@@ -1,19 +1,18 @@
 //! Standard error type for ocl futures.
-//!
 
 use std;
-// use std::sync::mpsc::{SendError as StdMpscSendError, RecvError as StdMpscRecvError};
-use failure::{Context, Fail, Backtrace};
-use futures::sync::oneshot::Canceled as OneshotCanceled;
-use futures::sync::mpsc::SendError;
-use crate::core::error::{Error as OclCoreError};
-use crate::core::Status;
-use crate::standard::{DeviceError, PlatformError, KernelError};
 
+// use std::sync::mpsc::{SendError as StdMpscSendError, RecvError as StdMpscRecvError};
+use failure::{Backtrace, Context, Fail};
+use futures::sync::mpsc::SendError;
+use futures::sync::oneshot::Canceled as OneshotCanceled;
+
+use crate::core::error::Error as OclCoreError;
+use crate::core::Status;
+use crate::standard::{DeviceError, KernelError, PlatformError};
 use crate::BufferCmdError;
 
 pub type Result<T> = std::result::Result<T, Error>;
-
 
 /// An enum containing either a `String` or one of several other error types.
 ///
@@ -39,7 +38,6 @@ pub enum ErrorKind {
     #[fail(display = "{}", _0)]
     Kernel(KernelError),
 }
-
 
 /// An Error.
 pub struct Error {
@@ -91,7 +89,9 @@ impl std::fmt::Debug for Error {
 
 impl From<OclCoreError> for Error {
     fn from(err: OclCoreError) -> Error {
-        Error { inner: Context::new(ErrorKind::OclCore(err)) }
+        Error {
+            inner: Context::new(ErrorKind::OclCore(err)),
+        }
     }
 }
 
@@ -99,8 +99,12 @@ impl<T> From<SendError<T>> for Error {
     fn from(err: SendError<T>) -> Error {
         let debug = format!("{:?}", err);
         let display = format!("{}", err);
-        Error { inner: Context::new(ErrorKind::FuturesMpscSend(
-            format!("{}: '{}'", debug, display))) }
+        Error {
+            inner: Context::new(ErrorKind::FuturesMpscSend(format!(
+                "{}: '{}'",
+                debug, display
+            ))),
+        }
     }
 }
 
@@ -121,57 +125,75 @@ impl<T> From<SendError<T>> for Error {
 
 impl From<OneshotCanceled> for Error {
     fn from(err: OneshotCanceled) -> Error {
-        Error { inner: Context::new(ErrorKind::OneshotCanceled(err)) }
+        Error {
+            inner: Context::new(ErrorKind::OneshotCanceled(err)),
+        }
     }
 }
 
 // TODO: Remove eventually
 impl From<String> for Error {
     fn from(desc: String) -> Error {
-        Error { inner: Context::new(ErrorKind::OclCore(desc.into())) }
+        Error {
+            inner: Context::new(ErrorKind::OclCore(desc.into())),
+        }
     }
 }
 
 // TODO: Remove eventually
 impl<'a> From<&'a str> for Error {
     fn from(desc: &'a str) -> Error {
-        Error { inner: Context::new(ErrorKind::OclCore(desc.into())) }
+        Error {
+            inner: Context::new(ErrorKind::OclCore(desc.into())),
+        }
     }
 }
 
 impl From<std::ffi::NulError> for Error {
     fn from(err: std::ffi::NulError) -> Error {
-        Error { inner: Context::new(ErrorKind::OclCore(err.into())) }
+        Error {
+            inner: Context::new(ErrorKind::OclCore(err.into())),
+        }
     }
 }
 
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Error {
-        Error { inner: Context::new(ErrorKind::OclCore(err.into())) }
+        Error {
+            inner: Context::new(ErrorKind::OclCore(err.into())),
+        }
     }
 }
 
 impl From<BufferCmdError> for Error {
     fn from(err: BufferCmdError) -> Error {
-        Error { inner: Context::new(ErrorKind::BufferCmd(err)) }
+        Error {
+            inner: Context::new(ErrorKind::BufferCmd(err)),
+        }
     }
 }
 
 impl From<DeviceError> for Error {
     fn from(err: DeviceError) -> Error {
-        Error { inner: Context::new(ErrorKind::Device(err)) }
+        Error {
+            inner: Context::new(ErrorKind::Device(err)),
+        }
     }
 }
 
 impl From<PlatformError> for Error {
     fn from(err: PlatformError) -> Error {
-        Error { inner: Context::new(ErrorKind::Platform(err)) }
+        Error {
+            inner: Context::new(ErrorKind::Platform(err)),
+        }
     }
 }
 
 impl From<KernelError> for Error {
     fn from(err: KernelError) -> Error {
-        Error { inner: Context::new(ErrorKind::Kernel(err)) }
+        Error {
+            inner: Context::new(ErrorKind::Kernel(err)),
+        }
     }
 }
 
@@ -180,7 +202,6 @@ impl From<Error> for String {
         err.to_string()
     }
 }
-
 
 unsafe impl Send for Error {}
 unsafe impl Sync for Error {}

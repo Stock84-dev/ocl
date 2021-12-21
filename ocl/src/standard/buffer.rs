@@ -3,22 +3,27 @@
 use std;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut, Range};
-use crate::core::{self, Error as OclCoreError, Result as OclCoreResult, OclPrm, Mem as MemCore,
-    MemFlags, MemInfo, MemInfoResult, BufferRegion, MapFlags, AsMem, MemCmdRw, MemCmdAll,
-    ClNullEventPtr};
-use crate::{Context, Queue, FutureMemMap, MemMap, Event, RwVec, FutureReadGuard, FutureWriteGuard,
-    SpatialDims};
-use crate::standard::{ClNullEventPtrEnum, ClWaitListPtrEnum, HostSlice};
+
+use crate::core::{
+    self, AsMem, BufferRegion, ClNullEventPtr, Error as OclCoreError, MapFlags, Mem as MemCore,
+    MemCmdAll, MemCmdRw, MemFlags, MemInfo, MemInfoResult, OclPrm, Result as OclCoreResult,
+};
 use crate::error::{Error as OclError, Result as OclResult};
-
-#[cfg(not(feature="opencl_vendor_mesa"))]
+#[cfg(not(feature = "opencl_vendor_mesa"))]
 use crate::ffi::cl_GLuint;
-
+use crate::standard::{ClNullEventPtrEnum, ClWaitListPtrEnum, HostSlice};
+use crate::{
+    Context, Event, FutureMemMap, FutureReadGuard, FutureWriteGuard, MemMap, Queue, RwVec,
+    SpatialDims,
+};
 
 fn check_len(mem_len: usize, data_len: usize, offset: usize) -> OclResult<()> {
     if offset >= mem_len {
-        Err(format!("ocl::Buffer::enq(): Offset out of range. \
-            (mem_len: {}, data_len: {}, offset: {}", mem_len, data_len, offset).into())
+        Err(format!(
+            "ocl::Buffer::enq(): Offset out of range. (mem_len: {}, data_len: {}, offset: {}",
+            mem_len, data_len, offset
+        )
+        .into())
     } else if data_len > (mem_len - offset) {
         Err("ocl::Buffer::enq(): Data length exceeds buffer length.".into())
     } else {
@@ -26,31 +31,32 @@ fn check_len(mem_len: usize, data_len: usize, offset: usize) -> OclResult<()> {
     }
 }
 
-
 /// A buffer command error.
 #[derive(Debug, Fail)]
 pub enum BufferCmdError {
-    #[fail(display = "A rectangular map is not a valid operation. \
-        Please use the default shape, linear.")]
+    #[fail(
+        display = "A rectangular map is not a valid operation. Please use the default shape, \
+                   linear."
+    )]
     RectUnavailable,
     #[fail(display = "No queue specified.")]
     NoQueue,
     #[fail(display = "Buffer already mapped.")]
     AlreadyMapped,
-    #[fail(display = "Unable to map this buffer. Must create with either the \
-        MEM_USE_HOST_PTR or MEM_ALLOC_HOST_PTR flag.")]
+    #[fail(
+        display = "Unable to map this buffer. Must create with either the MEM_USE_HOST_PTR or \
+                   MEM_ALLOC_HOST_PTR flag."
+    )]
     MapUnavailable,
     #[fail(display = "ocl-core error: {}", _0)]
-    Ocl(#[cause] OclCoreError)
+    Ocl(#[cause] OclCoreError),
 }
-
 
 impl From<OclCoreError> for BufferCmdError {
     fn from(err: OclCoreError) -> BufferCmdError {
         BufferCmdError::Ocl(err)
     }
 }
-
 
 /// A queue or context reference.
 #[derive(Debug, Clone)]
@@ -96,16 +102,29 @@ impl<'o> From<QueCtx<'o>> for Option<Queue> {
     }
 }
 
-
 /// The type of operation to be performed by a command.
-pub enum BufferCmdKind<'c, T> where T: 'c {
+pub enum BufferCmdKind<'c, T>
+where
+    T: 'c,
+{
     Unspecified,
     Read,
     Write,
     Map,
-    Copy { dst_buffer: &'c MemCore, dst_offset: Option<usize>, len: Option<usize> },
-    Fill { pattern: T, len: Option<usize> },
-    CopyToImage { image: &'c MemCore, dst_origin: [usize; 3], region: [usize; 3] },
+    Copy {
+        dst_buffer: &'c MemCore,
+        dst_offset: Option<usize>,
+        len: Option<usize>,
+    },
+    Fill {
+        pattern: T,
+        len: Option<usize>,
+    },
+    CopyToImage {
+        image: &'c MemCore,
+        dst_origin: [usize; 3],
+        region: [usize; 3],
+    },
     GLAcquire,
     GLRelease,
 }
@@ -123,9 +142,10 @@ impl<'c, T> BufferCmdKind<'c, T> {
 /// The 'shape' of the data to be processed, whether one or multi-dimensional.
 ///
 /// Should really be called dimensionality or something.
-///
 pub enum BufferCmdDataShape {
-    Lin { offset: usize },
+    Lin {
+        offset: usize,
+    },
     Rect {
         src_origin: [usize; 3],
         dst_origin: [usize; 3],
@@ -157,11 +177,12 @@ pub enum BufferCmdDataShape {
 ///
 /// // Reads without blocking:
 /// buffer.read(&dst_vec).block(false).enew(&mut empty_event).enq().unwrap();
-///
 /// ```
-///
 #[must_use = "commands do nothing unless enqueued"]
-pub struct BufferCmd<'c, T> where T: 'c + OclPrm {
+pub struct BufferCmd<'c, T>
+where
+    T: 'c + OclPrm,
+{
     buffer: &'c Buffer<T>,
     queue: Option<&'c Queue>,
     block: bool,
@@ -173,12 +194,18 @@ pub struct BufferCmd<'c, T> where T: 'c + OclPrm {
 }
 
 /// [UNSTABLE]: All methods still in a state of flux.
-impl<'c, T> BufferCmd<'c, T> where T: 'c + OclPrm {
+impl<'c, T> BufferCmd<'c, T>
+where
+    T: 'c + OclPrm,
+{
     /// Returns a new buffer command builder associated with with the
     /// memory object `obj_core` along with a default `queue` and `mem_len`
     /// (the length of the device side buffer).
-    fn new(buffer: &'c Buffer<T>, queue: Option<&'c Queue>, /*obj_core: &'c MemCore,*/ mem_len: usize)
-            -> BufferCmd<'c, T> {
+    fn new(
+        buffer: &'c Buffer<T>,
+        queue: Option<&'c Queue>,
+        /* obj_core: &'c MemCore, */ mem_len: usize,
+    ) -> BufferCmd<'c, T> {
         BufferCmd {
             buffer,
             queue,
@@ -206,13 +233,21 @@ impl<'c, T> BufferCmd<'c, T> where T: 'c + OclPrm {
     ///
     /// [read_buffer]: https://www.khronos.org/registry/OpenCL/sdk/1.2/docs/man/xhtml/clEnqueueReadBuffer.html
     pub fn read<'d, R>(mut self, dst_data: R) -> BufferReadCmd<'c, 'd, T>
-            where R: Into<ReadDst<'d, T>> {
-        assert!(self.kind.is_unspec(), "ocl::BufferCmd::read(): Operation kind \
-            already set for this command.");
+    where
+        R: Into<ReadDst<'d, T>>,
+    {
+        assert!(
+            self.kind.is_unspec(),
+            "ocl::BufferCmd::read(): Operation kind already set for this command."
+        );
         self.kind = BufferCmdKind::Read;
         let dst = dst_data.into();
         let len = dst.len();
-        BufferReadCmd { cmd: self, dst, range: 0..len }
+        BufferReadCmd {
+            cmd: self,
+            dst,
+            range: 0..len,
+        }
     }
 
     /// Specifies that this command will be a write operation.
@@ -227,13 +262,21 @@ impl<'c, T> BufferCmd<'c, T> where T: 'c + OclPrm {
     ///
     /// [write_buffer]: https://www.khronos.org/registry/OpenCL/sdk/1.2/docs/man/xhtml/clEnqueueWriteBuffer.html
     pub fn write<'d, W>(mut self, src_data: W) -> BufferWriteCmd<'c, 'd, T>
-            where W: Into<WriteSrc<'d, T>> {
-        assert!(self.kind.is_unspec(), "ocl::BufferCmd::write(): Operation kind \
-            already set for this command.");
+    where
+        W: Into<WriteSrc<'d, T>>,
+    {
+        assert!(
+            self.kind.is_unspec(),
+            "ocl::BufferCmd::write(): Operation kind already set for this command."
+        );
         self.kind = BufferCmdKind::Write;
         let src = src_data.into();
         let len = src.len();
-        BufferWriteCmd { cmd: self, src, range: 0..len }
+        BufferWriteCmd {
+            cmd: self,
+            src,
+            range: 0..len,
+        }
     }
 
     /// Specifies that this command will be a map operation.
@@ -259,12 +302,17 @@ impl<'c, T> BufferCmd<'c, T> where T: 'c + OclPrm {
     /// [`FutureMemMap`]: async/struct.FutureMemMap.html
     /// [slice]: https://doc.rust-lang.org/std/primitive.slice.html
     pub fn map(mut self) -> BufferMapCmd<'c, T> {
-        assert!(self.kind.is_unspec(), "ocl::BufferCmd::write(): Operation kind \
-            already set for this command.");
+        assert!(
+            self.kind.is_unspec(),
+            "ocl::BufferCmd::write(): Operation kind already set for this command."
+        );
         self.kind = BufferCmdKind::Map;
-        BufferMapCmd { cmd: self, flags: None, len: None }
+        BufferMapCmd {
+            cmd: self,
+            flags: None,
+            len: None,
+        }
     }
-
 
     /// Specifies that this command will be a copy operation.
     ///
@@ -286,11 +334,20 @@ impl<'c, T> BufferCmd<'c, T> where T: 'c + OclPrm {
     /// See [SDK][copy_buffer] docs for more details.
     ///
     /// [copy_buffer]: https://www.khronos.org/registry/OpenCL/sdk/1.2/docs/man/xhtml/clEnqueueCopyBuffer.html
-    pub fn copy<'d, M>(mut self, dst_buffer: &'d M, dst_offset: Option<usize>, len: Option<usize>)
-            -> BufferCmd<'c, T>
-            where 'd: 'c, M: AsMem<T> {
-        assert!(self.kind.is_unspec(), "ocl::BufferCmd::copy(): Operation kind \
-            already set for this command.");
+    pub fn copy<'d, M>(
+        mut self,
+        dst_buffer: &'d M,
+        dst_offset: Option<usize>,
+        len: Option<usize>,
+    ) -> BufferCmd<'c, T>
+    where
+        'd: 'c,
+        M: AsMem<T>,
+    {
+        assert!(
+            self.kind.is_unspec(),
+            "ocl::BufferCmd::copy(): Operation kind already set for this command."
+        );
         self.kind = BufferCmdKind::Copy {
             dst_buffer: dst_buffer.as_mem(),
             dst_offset,
@@ -306,13 +363,24 @@ impl<'c, T> BufferCmd<'c, T> where T: 'c + OclPrm {
     /// ## Panics
     ///
     /// The command operation kind must not have already been specified
-    ///
-    pub fn copy_to_image<'d>(mut self, image: &'d MemCore, dst_origin: [usize; 3],
-            region: [usize; 3]) -> BufferCmd<'c, T>
-            where 'd: 'c {
-        assert!(self.kind.is_unspec(), "ocl::BufferCmd::copy_to_image(): Operation kind \
-            already set for this command.");
-        self.kind = BufferCmdKind::CopyToImage { image, dst_origin, region };
+    pub fn copy_to_image<'d>(
+        mut self,
+        image: &'d MemCore,
+        dst_origin: [usize; 3],
+        region: [usize; 3],
+    ) -> BufferCmd<'c, T>
+    where
+        'd: 'c,
+    {
+        assert!(
+            self.kind.is_unspec(),
+            "ocl::BufferCmd::copy_to_image(): Operation kind already set for this command."
+        );
+        self.kind = BufferCmdKind::CopyToImage {
+            image,
+            dst_origin,
+            region,
+        };
         self
     }
 
@@ -323,10 +391,11 @@ impl<'c, T> BufferCmd<'c, T> where T: 'c + OclPrm {
     /// ## Panics
     ///
     /// The command operation kind must not have already been specified
-    ///
     pub fn gl_acquire(mut self) -> BufferCmd<'c, T> {
-        assert!(self.kind.is_unspec(), "ocl::BufferCmd::gl_acquire(): Operation kind \
-            already set for this command.");
+        assert!(
+            self.kind.is_unspec(),
+            "ocl::BufferCmd::gl_acquire(): Operation kind already set for this command."
+        );
         self.kind = BufferCmdKind::GLAcquire;
         self
     }
@@ -338,10 +407,11 @@ impl<'c, T> BufferCmd<'c, T> where T: 'c + OclPrm {
     /// ## Panics
     ///
     /// The command operation kind must not have already been specified
-    ///
     pub fn gl_release(mut self) -> BufferCmd<'c, T> {
-        assert!(self.kind.is_unspec(), "ocl::BufferCmd::gl_release(): Operation kind \
-            already set for this command.");
+        assert!(
+            self.kind.is_unspec(),
+            "ocl::BufferCmd::gl_release(): Operation kind already set for this command."
+        );
         self.kind = BufferCmdKind::GLRelease;
         self
     }
@@ -362,10 +432,11 @@ impl<'c, T> BufferCmd<'c, T> where T: 'c + OclPrm {
     /// ## Panics
     ///
     /// The command operation kind must not have already been specified
-    ///
     pub fn fill(mut self, pattern: T, len: Option<usize>) -> BufferCmd<'c, T> {
-        assert!(self.kind.is_unspec(), "ocl::BufferCmd::fill(): Operation kind \
-            already set for this command.");
+        assert!(
+            self.kind.is_unspec(),
+            "ocl::BufferCmd::fill(): Operation kind already set for this command."
+        );
         self.kind = BufferCmdKind::Fill { pattern, len };
         self
     }
@@ -414,10 +485,12 @@ impl<'c, T> BufferCmd<'c, T> where T: 'c + OclPrm {
     ///
     /// The 'shape' may not have already been set to rectangular by the
     /// `::rect` function.
-    pub fn offset(mut self, offset: usize)  -> BufferCmd<'c, T> {
+    pub fn offset(mut self, offset: usize) -> BufferCmd<'c, T> {
         if let BufferCmdDataShape::Rect { .. } = self.shape {
-            panic!("ocl::BufferCmd::offset(): This command builder has already been set to \
-                rectangular mode with '::rect`. You cannot call both '::offset' and '::rect'.");
+            panic!(
+                "ocl::BufferCmd::offset(): This command builder has already been set to \
+                 rectangular mode with '::rect`. You cannot call both '::offset' and '::rect'."
+            );
         }
         self.shape = BufferCmdDataShape::Lin { offset };
         self
@@ -430,16 +503,32 @@ impl<'c, T> BufferCmd<'c, T> where T: 'c + OclPrm {
     ///
     /// Only valid for 'read', 'write', and 'copy' modes. Will error if used
     /// with any other mode.
-    pub fn rect(mut self, src_origin: [usize; 3], dst_origin: [usize; 3], region: [usize; 3],
-                src_row_pitch_bytes: usize, src_slc_pitch_bytes: usize, dst_row_pitch_bytes: usize,
-                dst_slc_pitch_bytes: usize) -> BufferCmd<'c, T> {
+    pub fn rect(
+        mut self,
+        src_origin: [usize; 3],
+        dst_origin: [usize; 3],
+        region: [usize; 3],
+        src_row_pitch_bytes: usize,
+        src_slc_pitch_bytes: usize,
+        dst_row_pitch_bytes: usize,
+        dst_slc_pitch_bytes: usize,
+    ) -> BufferCmd<'c, T> {
         if let BufferCmdDataShape::Lin { offset } = self.shape {
-            assert!(offset == 0, "ocl::BufferCmd::rect(): This command builder has already been \
-                set to linear mode with '::offset`. You cannot call both '::offset' and '::rect'.");
+            assert!(
+                offset == 0,
+                "ocl::BufferCmd::rect(): This command builder has already been set to linear mode \
+                 with '::offset`. You cannot call both '::offset' and '::rect'."
+            );
         }
-        self.shape = BufferCmdDataShape::Rect { src_origin, dst_origin, region,
-            src_row_pitch_bytes, src_slc_pitch_bytes,
-            dst_row_pitch_bytes, dst_slc_pitch_bytes };
+        self.shape = BufferCmdDataShape::Rect {
+            src_origin,
+            dst_origin,
+            region,
+            src_row_pitch_bytes,
+            src_slc_pitch_bytes,
+            dst_row_pitch_bytes,
+            dst_slc_pitch_bytes,
+        };
         self
     }
 
@@ -472,7 +561,10 @@ impl<'c, T> BufferCmd<'c, T> where T: 'c + OclPrm {
     ///
     /// [`EventList`]: struct.EventList.html
     pub fn ewait<'e, Ewl>(mut self, ewait: Ewl) -> BufferCmd<'c, T>
-            where 'e: 'c, Ewl: Into<ClWaitListPtrEnum<'e>> {
+    where
+        'e: 'c,
+        Ewl: Into<ClWaitListPtrEnum<'e>>,
+    {
         self.ewait = Some(ewait.into());
         self
     }
@@ -509,7 +601,10 @@ impl<'c, T> BufferCmd<'c, T> where T: 'c + OclPrm {
     ///
     /// [`Event::empty`]: struct.Event.html#method.empty
     pub fn enew<'e, En>(mut self, enew: En) -> BufferCmd<'c, T>
-            where 'e: 'c, En: Into<ClNullEventPtrEnum<'e>> {
+    where
+        'e: 'c,
+        En: Into<ClNullEventPtrEnum<'e>>,
+    {
         self.enew = Some(enew.into());
         self
     }
@@ -522,79 +617,118 @@ impl<'c, T> BufferCmd<'c, T> where T: 'c + OclPrm {
         };
 
         match self.kind {
-            BufferCmdKind::Copy { dst_buffer, dst_offset, len } => {
-                match self.shape {
-                    BufferCmdDataShape::Lin { offset } => {
-                        let len = len.unwrap_or(self.mem_len);
-                        check_len(self.mem_len, len, offset)?;
-                        let dst_offset = dst_offset.unwrap_or(0);
+            BufferCmdKind::Copy {
+                dst_buffer,
+                dst_offset,
+                len,
+            } => match self.shape {
+                BufferCmdDataShape::Lin { offset } => {
+                    let len = len.unwrap_or(self.mem_len);
+                    check_len(self.mem_len, len, offset)?;
+                    let dst_offset = dst_offset.unwrap_or(0);
 
-                        core::enqueue_copy_buffer::<T, _, _, _>(queue,
-                            &self.buffer.obj_core, dst_buffer, offset, dst_offset, len,
-                            self.ewait, self.enew).map_err(OclError::from)
-                    },
-                    BufferCmdDataShape::Rect { src_origin, dst_origin, region,
-                        src_row_pitch_bytes, src_slc_pitch_bytes, dst_row_pitch_bytes,
-                        dst_slc_pitch_bytes } =>
-                    {
-                        if dst_offset.is_some() || len.is_some() { return Err(
-                            "ocl::BufferCmd::enq(): For 'rect' shaped copies, destination \
-                            offset and length must be 'None'. Ex.: \
-                            'cmd().copy(&{{buf_name}}, None, None)..'.".into());
-                        }
+                    core::enqueue_copy_buffer::<T, _, _, _>(
+                        queue,
+                        &self.buffer.obj_core,
+                        dst_buffer,
+                        offset,
+                        dst_offset,
+                        len,
+                        self.ewait,
+                        self.enew,
+                    )
+                    .map_err(OclError::from)
+                }
+                BufferCmdDataShape::Rect {
+                    src_origin,
+                    dst_origin,
+                    region,
+                    src_row_pitch_bytes,
+                    src_slc_pitch_bytes,
+                    dst_row_pitch_bytes,
+                    dst_slc_pitch_bytes,
+                } => {
+                    if dst_offset.is_some() || len.is_some() {
+                        return Err("ocl::BufferCmd::enq(): For 'rect' shaped copies, \
+                                    destination offset and length must be 'None'. Ex.: \
+                                    'cmd().copy(&{{buf_name}}, None, None)..'."
+                            .into());
+                    }
 
-                        core::enqueue_copy_buffer_rect::<T, _, _, _>(queue, &self.buffer.obj_core,
-                            dst_buffer, src_origin, dst_origin, region, src_row_pitch_bytes,
-                            src_slc_pitch_bytes, dst_row_pitch_bytes, dst_slc_pitch_bytes,
-                            self.ewait, self.enew).map_err(OclError::from)
-                    },
+                    core::enqueue_copy_buffer_rect::<T, _, _, _>(
+                        queue,
+                        &self.buffer.obj_core,
+                        dst_buffer,
+                        src_origin,
+                        dst_origin,
+                        region,
+                        src_row_pitch_bytes,
+                        src_slc_pitch_bytes,
+                        dst_row_pitch_bytes,
+                        dst_slc_pitch_bytes,
+                        self.ewait,
+                        self.enew,
+                    )
+                    .map_err(OclError::from)
                 }
             },
 
-            #[cfg(not(feature="opencl_vendor_mesa"))]
-            BufferCmdKind::Fill { pattern, len } => {
-                match self.shape {
-                    BufferCmdDataShape::Lin { offset } => {
-                        let len = match len {
-                            Some(l) => l,
-                            None => self.mem_len,
-                        };
+            #[cfg(not(feature = "opencl_vendor_mesa"))]
+            BufferCmdKind::Fill { pattern, len } => match self.shape {
+                BufferCmdDataShape::Lin { offset } => {
+                    let len = match len {
+                        Some(l) => l,
+                        None => self.mem_len,
+                    };
 
-                        check_len(self.mem_len, len, offset)?;
+                    check_len(self.mem_len, len, offset)?;
 
-                        core::enqueue_fill_buffer(queue, &self.buffer.obj_core, pattern,
-                            offset, len, self.ewait, self.enew, Some(&queue.device_version()))
-                            .map_err(OclError::from)
-                    },
-                    BufferCmdDataShape::Rect { .. } => Err(
-                        "ocl::BufferCmd::enq(): Rectangular fill is not a valid operation. \
-                        Please use the default shape, linear.".into())
+                    core::enqueue_fill_buffer(
+                        queue,
+                        &self.buffer.obj_core,
+                        pattern,
+                        offset,
+                        len,
+                        self.ewait,
+                        self.enew,
+                        Some(&queue.device_version()),
+                    )
+                    .map_err(OclError::from)
                 }
+                BufferCmdDataShape::Rect { .. } => Err("ocl::BufferCmd::enq(): Rectangular fill \
+                                                        is not a valid operation. Please use the \
+                                                        default shape, linear."
+                    .into()),
             },
-            #[cfg(not(feature="opencl_vendor_mesa"))]
+            #[cfg(not(feature = "opencl_vendor_mesa"))]
             BufferCmdKind::GLAcquire => {
                 let buf_slc = unsafe { std::slice::from_raw_parts(&self.buffer.obj_core, 1) };
-                core::enqueue_acquire_gl_objects(queue, buf_slc, self.ewait, self.enew).map_err(OclError::from)
-            },
+                core::enqueue_acquire_gl_objects(queue, buf_slc, self.ewait, self.enew)
+                    .map_err(OclError::from)
+            }
 
-            #[cfg(not(feature="opencl_vendor_mesa"))]
+            #[cfg(not(feature = "opencl_vendor_mesa"))]
             BufferCmdKind::GLRelease => {
                 let buf_slc = unsafe { std::slice::from_raw_parts(&self.buffer.obj_core, 1) };
-                core::enqueue_release_gl_objects(queue, buf_slc, self.ewait, self.enew).map_err(OclError::from)
-            },
+                core::enqueue_release_gl_objects(queue, buf_slc, self.ewait, self.enew)
+                    .map_err(OclError::from)
+            }
 
-            BufferCmdKind::Unspecified => Err("ocl::BufferCmd::enq(): \
-                No operation specified. Use '.read(...)', 'write(...)', etc. before calling \
-                '.enq()'.".into()),
+            BufferCmdKind::Unspecified => Err("ocl::BufferCmd::enq(): No operation specified. \
+                                               Use '.read(...)', 'write(...)', etc. before \
+                                               calling '.enq()'."
+                .into()),
             BufferCmdKind::Map { .. } => unreachable!(),
             _ => unimplemented!(),
         }
     }
 }
 
-
 /// The data destination for a buffer read command.
-pub enum ReadDst<'d, T> where T: 'd {
+pub enum ReadDst<'d, T>
+where
+    T: 'd,
+{
     Slice(&'d mut [T]),
     RwVec(RwVec<T>),
     Writer(FutureWriteGuard<Vec<T>>),
@@ -616,36 +750,50 @@ impl<'d, T> ReadDst<'d, T> {
     }
 }
 
-impl<'d, T> From<&'d mut [T]> for ReadDst<'d, T>  where T: OclPrm {
+impl<'d, T> From<&'d mut [T]> for ReadDst<'d, T>
+where
+    T: OclPrm,
+{
     fn from(slice: &'d mut [T]) -> ReadDst<'d, T> {
         ReadDst::Slice(slice)
     }
 }
 
-impl<'d, T> From<&'d mut Vec<T>> for ReadDst<'d, T>  where T: OclPrm {
+impl<'d, T> From<&'d mut Vec<T>> for ReadDst<'d, T>
+where
+    T: OclPrm,
+{
     fn from(vec: &'d mut Vec<T>) -> ReadDst<'d, T> {
         ReadDst::Slice(vec.as_mut_slice())
     }
 }
 
-impl<'d, T> From<RwVec<T>> for ReadDst<'d, T> where T: OclPrm {
+impl<'d, T> From<RwVec<T>> for ReadDst<'d, T>
+where
+    T: OclPrm,
+{
     fn from(rw_vec: RwVec<T>) -> ReadDst<'d, T> {
         ReadDst::RwVec(rw_vec)
     }
 }
 
-impl<'a, 'd, T> From<&'a RwVec<T>> for ReadDst<'d, T> where T: OclPrm {
+impl<'a, 'd, T> From<&'a RwVec<T>> for ReadDst<'d, T>
+where
+    T: OclPrm,
+{
     fn from(rw_vec: &'a RwVec<T>) -> ReadDst<'d, T> {
         ReadDst::RwVec(rw_vec.clone())
     }
 }
 
-impl<'d, T> From<FutureWriteGuard<Vec<T>>> for ReadDst<'d, T> where T: OclPrm {
+impl<'d, T> From<FutureWriteGuard<Vec<T>>> for ReadDst<'d, T>
+where
+    T: OclPrm,
+{
     fn from(writer: FutureWriteGuard<Vec<T>>) -> ReadDst<'d, T> {
         ReadDst::Writer(writer)
     }
 }
-
 
 /// A buffer command builder used to enqueue reads.
 ///
@@ -653,13 +801,19 @@ impl<'d, T> From<FutureWriteGuard<Vec<T>>> for ReadDst<'d, T> where T: OclPrm {
 ///
 /// [read_buffer]: https://www.khronos.org/registry/OpenCL/sdk/1.2/docs/man/xhtml/clEnqueueReadBuffer.html
 #[must_use = "commands do nothing unless enqueued"]
-pub struct BufferReadCmd<'c, 'd, T> where T: 'c + 'd + OclPrm {
+pub struct BufferReadCmd<'c, 'd, T>
+where
+    T: 'c + 'd + OclPrm,
+{
     cmd: BufferCmd<'c, T>,
     dst: ReadDst<'d, T>,
     range: Range<usize>,
 }
 
-impl<'c, 'd, T> BufferReadCmd<'c, 'd, T> where T: OclPrm {
+impl<'c, 'd, T> BufferReadCmd<'c, 'd, T>
+where
+    T: OclPrm,
+{
     /// Specifies a queue to use for this call only.
     ///
     /// Overrides the buffer's default queue if one is set. If no default
@@ -703,7 +857,10 @@ impl<'c, 'd, T> BufferReadCmd<'c, 'd, T> where T: OclPrm {
     /// The 'shape' may not have already been set to rectangular by the
     /// `::rect` function.
     pub fn offset(self, offset: usize) -> BufferReadCmd<'c, 'd, T> {
-        BufferReadCmd { cmd: self.cmd.offset(offset), ..self }
+        BufferReadCmd {
+            cmd: self.cmd.offset(offset),
+            ..self
+        }
     }
 
     /// Sets an offset into the destination data.
@@ -744,20 +901,36 @@ impl<'c, 'd, T> BufferReadCmd<'c, 'd, T> where T: OclPrm {
     /// Row and slice pitches must all be expressed in bytes.
     ///
     /// Panics if `:offset`, `dst_offset`, or `::len` have been called.
-    pub fn rect(mut self, src_origin: [usize; 3], dst_origin: [usize; 3], region: [usize; 3],
-                src_row_pitch_bytes: usize, src_slc_pitch_bytes: usize, dst_row_pitch_bytes: usize,
-                dst_slc_pitch_bytes: usize) -> BufferReadCmd<'c, 'd, T> {
+    pub fn rect(
+        mut self,
+        src_origin: [usize; 3],
+        dst_origin: [usize; 3],
+        region: [usize; 3],
+        src_row_pitch_bytes: usize,
+        src_slc_pitch_bytes: usize,
+        dst_row_pitch_bytes: usize,
+        dst_slc_pitch_bytes: usize,
+    ) -> BufferReadCmd<'c, 'd, T> {
         if let BufferCmdDataShape::Lin { offset } = self.cmd.shape {
-            assert!(offset == 0, "ocl::BufferCmd::rect(): This command builder has already been \
-                set to linear mode with '::offset`. You cannot call both '::offset' and '::rect'.");
+            assert!(
+                offset == 0,
+                "ocl::BufferCmd::rect(): This command builder has already been set to linear mode \
+                 with '::offset`. You cannot call both '::offset' and '::rect'."
+            );
         }
         if self.range.len() != self.dst.len() {
             panic!("Buffer read: Cannot call '::rect' after calling '::src_offset' or '::len'.");
         }
 
-        self.cmd.shape = BufferCmdDataShape::Rect { src_origin, dst_origin, region,
-            src_row_pitch_bytes, src_slc_pitch_bytes,
-            dst_row_pitch_bytes, dst_slc_pitch_bytes };
+        self.cmd.shape = BufferCmdDataShape::Rect {
+            src_origin,
+            dst_origin,
+            region,
+            src_row_pitch_bytes,
+            src_slc_pitch_bytes,
+            dst_row_pitch_bytes,
+            dst_slc_pitch_bytes,
+        };
 
         self
     }
@@ -791,7 +964,10 @@ impl<'c, 'd, T> BufferReadCmd<'c, 'd, T> where T: OclPrm {
     ///
     /// [`EventList`]: struct.EventList.html
     pub fn ewait<'e, Ewl>(mut self, ewait: Ewl) -> BufferReadCmd<'c, 'd, T>
-            where 'e: 'c,  Ewl: Into<ClWaitListPtrEnum<'e>> {
+    where
+        'e: 'c,
+        Ewl: Into<ClWaitListPtrEnum<'e>>,
+    {
         self.cmd.ewait = Some(ewait.into());
         self
     }
@@ -828,7 +1004,10 @@ impl<'c, 'd, T> BufferReadCmd<'c, 'd, T> where T: OclPrm {
     ///
     /// [`Event::empty`]: struct.Event.html#method.empty
     pub fn enew<'e, En>(mut self, enew: En) -> BufferReadCmd<'c, 'd, T>
-            where 'e: 'c, En: Into<ClNullEventPtrEnum<'e>> {
+    where
+        'e: 'c,
+        En: Into<ClNullEventPtrEnum<'e>>,
+    {
         self.cmd.enew = Some(enew.into());
         self
     }
@@ -843,8 +1022,11 @@ impl<'c, 'd, T> BufferReadCmd<'c, 'd, T> where T: OclPrm {
     pub fn enq(mut self) -> OclResult<()> {
         let read_dst = self.dst.take();
         let range = self.range.clone();
-        if range.end > read_dst.len() { return Err(OclError::from(
-            "Unable to enqueue buffer read command: Invalid src_offset and/or len.")) }
+        if range.end > read_dst.len() {
+            return Err(OclError::from(
+                "Unable to enqueue buffer read command: Invalid src_offset and/or len.",
+            ));
+        }
 
         let mut enqueue_with_data = |dst: &mut [T]| {
             let queue = match self.cmd.queue {
@@ -858,40 +1040,65 @@ impl<'c, 'd, T> BufferReadCmd<'c, 'd, T> where T: OclPrm {
                         BufferCmdDataShape::Lin { offset } => {
                             check_len(self.cmd.mem_len, dst.len(), offset)?;
                             unsafe {
-                                core::enqueue_read_buffer(queue, &self.cmd.buffer.obj_core,
-                                    self.cmd.block, offset, dst, self.cmd.ewait.take(),
-                                    self.cmd.enew.take()).map_err(OclError::from)
+                                core::enqueue_read_buffer(
+                                    queue,
+                                    &self.cmd.buffer.obj_core,
+                                    self.cmd.block,
+                                    offset,
+                                    dst,
+                                    self.cmd.ewait.take(),
+                                    self.cmd.enew.take(),
+                                )
+                                .map_err(OclError::from)
                             }
-                        },
-                        BufferCmdDataShape::Rect { src_origin, dst_origin, region, src_row_pitch_bytes,
-                                src_slc_pitch_bytes, dst_row_pitch_bytes, dst_slc_pitch_bytes } =>
-                        {
+                        }
+                        BufferCmdDataShape::Rect {
+                            src_origin,
+                            dst_origin,
+                            region,
+                            src_row_pitch_bytes,
+                            src_slc_pitch_bytes,
+                            dst_row_pitch_bytes,
+                            dst_slc_pitch_bytes,
+                        } => {
                             // TODO: Verify dims given (like `::check_len`).
                             unsafe {
-                                core::enqueue_read_buffer_rect(queue, &self.cmd.buffer.obj_core,
-                                    self.cmd.block, src_origin, dst_origin, region,
-                                    src_row_pitch_bytes, src_slc_pitch_bytes, dst_row_pitch_bytes,
-                                    dst_slc_pitch_bytes, dst, self.cmd.ewait.take(),
-                                    self.cmd.enew.take()).map_err(OclError::from)
+                                core::enqueue_read_buffer_rect(
+                                    queue,
+                                    &self.cmd.buffer.obj_core,
+                                    self.cmd.block,
+                                    src_origin,
+                                    dst_origin,
+                                    region,
+                                    src_row_pitch_bytes,
+                                    src_slc_pitch_bytes,
+                                    dst_row_pitch_bytes,
+                                    dst_slc_pitch_bytes,
+                                    dst,
+                                    self.cmd.ewait.take(),
+                                    self.cmd.enew.take(),
+                                )
+                                .map_err(OclError::from)
                             }
                         }
                     }
-                },
+                }
                 _ => unreachable!(),
             }
         };
 
         match read_dst {
-            ReadDst::Slice(slice) => {
-                enqueue_with_data(&mut slice[range])
-            },
+            ReadDst::Slice(slice) => enqueue_with_data(&mut slice[range]),
             ReadDst::RwVec(rw_vec) => {
-                let mut guard = rw_vec.write().wait()
+                let mut guard = rw_vec
+                    .write()
+                    .wait()
                     .map_err(|_| OclError::from("Unable to obtain lock."))?;
                 enqueue_with_data(&mut guard.as_mut_slice()[range])
-            },
+            }
             ReadDst::Writer(writer) => {
-                let mut guard = writer.wait()
+                let mut guard = writer
+                    .wait()
                     .map_err(|_| OclError::from("Unable to obtain lock."))?;
                 enqueue_with_data(&mut guard.as_mut_slice()[range])
             }
@@ -905,7 +1112,6 @@ impl<'c, 'd, T> BufferReadCmd<'c, 'd, T> where T: OclPrm {
     ///
     /// A data destination container appropriate for an asynchronous operation
     /// (such as `RwVec`) must have been passed to `::read`.
-    ///
     pub fn enq_async(mut self) -> OclResult<FutureWriteGuard<Vec<T>>> {
         let queue = match self.cmd.queue {
             Some(q) => q,
@@ -917,13 +1123,19 @@ impl<'c, 'd, T> BufferReadCmd<'c, 'd, T> where T: OclPrm {
                 let mut writer = match self.dst {
                     ReadDst::RwVec(rw_vec) => rw_vec.write(),
                     ReadDst::Writer(writer) => writer,
-                    _ => return Err("BufferReadCmd::enq_async: Invalid data destination kind for an
-                        asynchronous enqueue. The read destination must be a 'RwVec'.".into()),
+                    _ => {
+                        return Err(
+                            "BufferReadCmd::enq_async: Invalid data destination kind for an
+                        asynchronous enqueue. The read destination must be a 'RwVec'."
+                                .into(),
+                        )
+                    }
                 };
                 let writer_len = unsafe { (*writer.as_ptr()).len() };
                 if self.range.end > writer_len {
-                    return Err(OclError::from("Unable to enqueue buffer read command: \
-                        Invalid src_offset and/or len."))
+                    return Err(OclError::from(
+                        "Unable to enqueue buffer read command: Invalid src_offset and/or len.",
+                    ));
                 }
 
                 writer.create_lock_event(queue.context_ptr()?)?;
@@ -936,7 +1148,9 @@ impl<'c, 'd, T> BufferReadCmd<'c, 'd, T> where T: OclPrm {
                 //     Invalid writer.")[self.range] };
                 let dst = unsafe {
                     &mut ::std::slice::from_raw_parts_mut(
-                        (*writer.as_mut_ptr()).as_mut_ptr(), writer_len)[self.range]
+                        (*writer.as_mut_ptr()).as_mut_ptr(),
+                        writer_len,
+                    )[self.range]
                 };
 
                 let mut read_event = Event::empty();
@@ -945,18 +1159,43 @@ impl<'c, 'd, T> BufferReadCmd<'c, 'd, T> where T: OclPrm {
                     BufferCmdDataShape::Lin { offset } => {
                         check_len(self.cmd.mem_len, dst.len(), offset)?;
 
-                        unsafe { core::enqueue_read_buffer(queue, &self.cmd.buffer.obj_core, false,
-                            offset, dst, writer.lock_event(), Some(&mut read_event))?; }
-                    },
-                    BufferCmdDataShape::Rect { src_origin, dst_origin, region,
-                        src_row_pitch_bytes, src_slc_pitch_bytes,
-                            dst_row_pitch_bytes, dst_slc_pitch_bytes } =>
-                    {
-                        unsafe { core::enqueue_read_buffer_rect(queue, &self.cmd.buffer.obj_core,
-                            false, src_origin, dst_origin, region, src_row_pitch_bytes,
-                            src_slc_pitch_bytes, dst_row_pitch_bytes, dst_slc_pitch_bytes,
-                            dst, writer.lock_event(), Some(&mut read_event))?; }
+                        unsafe {
+                            core::enqueue_read_buffer(
+                                queue,
+                                &self.cmd.buffer.obj_core,
+                                false,
+                                offset,
+                                dst,
+                                writer.lock_event(),
+                                Some(&mut read_event),
+                            )?;
+                        }
                     }
+                    BufferCmdDataShape::Rect {
+                        src_origin,
+                        dst_origin,
+                        region,
+                        src_row_pitch_bytes,
+                        src_slc_pitch_bytes,
+                        dst_row_pitch_bytes,
+                        dst_slc_pitch_bytes,
+                    } => unsafe {
+                        core::enqueue_read_buffer_rect(
+                            queue,
+                            &self.cmd.buffer.obj_core,
+                            false,
+                            src_origin,
+                            dst_origin,
+                            region,
+                            src_row_pitch_bytes,
+                            src_slc_pitch_bytes,
+                            dst_row_pitch_bytes,
+                            dst_slc_pitch_bytes,
+                            dst,
+                            writer.lock_event(),
+                            Some(&mut read_event),
+                        )?;
+                    },
                 }
 
                 if let Some(ref mut enew) = self.cmd.enew.take() {
@@ -965,15 +1204,17 @@ impl<'c, 'd, T> BufferReadCmd<'c, 'd, T> where T: OclPrm {
 
                 writer.set_command_wait_event(read_event);
                 Ok(writer)
-            },
+            }
             _ => unreachable!(),
         }
     }
 }
 
-
 /// The data destination for a buffer read command.
-pub enum WriteSrc<'d, T> where T: 'd {
+pub enum WriteSrc<'d, T>
+where
+    T: 'd,
+{
     Slice(&'d [T]),
     RwVec(RwVec<T>),
     Reader(FutureReadGuard<Vec<T>>),
@@ -995,36 +1236,50 @@ impl<'d, T> WriteSrc<'d, T> {
     }
 }
 
-impl<'d, T> From<&'d [T]> for WriteSrc<'d, T>  where T: OclPrm {
+impl<'d, T> From<&'d [T]> for WriteSrc<'d, T>
+where
+    T: OclPrm,
+{
     fn from(slice: &'d [T]) -> WriteSrc<'d, T> {
         WriteSrc::Slice(slice)
     }
 }
 
-impl<'d, T> From<&'d Vec<T>> for WriteSrc<'d, T>  where T: OclPrm {
+impl<'d, T> From<&'d Vec<T>> for WriteSrc<'d, T>
+where
+    T: OclPrm,
+{
     fn from(vec: &'d Vec<T>) -> WriteSrc<'d, T> {
         WriteSrc::Slice(vec.as_slice())
     }
 }
 
-impl<'d, T> From<RwVec<T>> for WriteSrc<'d, T> where T: OclPrm {
+impl<'d, T> From<RwVec<T>> for WriteSrc<'d, T>
+where
+    T: OclPrm,
+{
     fn from(rw_vec: RwVec<T>) -> WriteSrc<'d, T> {
         WriteSrc::RwVec(rw_vec)
     }
 }
 
-impl<'a, 'd, T> From<&'a RwVec<T>> for WriteSrc<'d, T> where T: OclPrm {
+impl<'a, 'd, T> From<&'a RwVec<T>> for WriteSrc<'d, T>
+where
+    T: OclPrm,
+{
     fn from(rw_vec: &'a RwVec<T>) -> WriteSrc<'d, T> {
         WriteSrc::RwVec(rw_vec.clone())
     }
 }
 
-impl<'d, T> From<FutureReadGuard<Vec<T>>> for WriteSrc<'d, T> where T: OclPrm {
+impl<'d, T> From<FutureReadGuard<Vec<T>>> for WriteSrc<'d, T>
+where
+    T: OclPrm,
+{
     fn from(reader: FutureReadGuard<Vec<T>>) -> WriteSrc<'d, T> {
         WriteSrc::Reader(reader)
     }
 }
-
 
 /// A buffer command builder used to enqueue writes.
 ///
@@ -1032,13 +1287,19 @@ impl<'d, T> From<FutureReadGuard<Vec<T>>> for WriteSrc<'d, T> where T: OclPrm {
 ///
 /// [write_buffer]: https://www.khronos.org/registry/OpenCL/sdk/1.2/docs/man/xhtml/clEnqueueWriteBuffer.html
 #[must_use = "commands do nothing unless enqueued"]
-pub struct BufferWriteCmd<'c, 'd, T> where T: 'c + 'd + OclPrm {
+pub struct BufferWriteCmd<'c, 'd, T>
+where
+    T: 'c + 'd + OclPrm,
+{
     cmd: BufferCmd<'c, T>,
     src: WriteSrc<'d, T>,
     range: Range<usize>,
- }
+}
 
-impl<'c, 'd, T> BufferWriteCmd<'c, 'd, T> where T: OclPrm {
+impl<'c, 'd, T> BufferWriteCmd<'c, 'd, T>
+where
+    T: OclPrm,
+{
     /// Specifies a queue to use for this call only.
     ///
     /// Overrides the buffer's default queue if one is set. If no default
@@ -1081,8 +1342,11 @@ impl<'c, 'd, T> BufferWriteCmd<'c, 'd, T> where T: OclPrm {
     ///
     /// The 'shape' may not have already been set to rectangular by the
     /// `::rect` function.
-    pub fn offset(self, offset: usize)  -> BufferWriteCmd<'c, 'd, T> {
-        BufferWriteCmd { cmd: self.cmd.offset(offset), ..self }
+    pub fn offset(self, offset: usize) -> BufferWriteCmd<'c, 'd, T> {
+        BufferWriteCmd {
+            cmd: self.cmd.offset(offset),
+            ..self
+        }
     }
 
     /// Sets an offset into the source data.
@@ -1123,20 +1387,36 @@ impl<'c, 'd, T> BufferWriteCmd<'c, 'd, T> where T: OclPrm {
     /// Row and slice pitches must all be expressed in bytes.
     ///
     /// Panics if `:offset`, `src_offset`, or `::len` have been called.
-    pub fn rect(mut self, src_origin: [usize; 3], dst_origin: [usize; 3], region: [usize; 3],
-                src_row_pitch_bytes: usize, src_slc_pitch_bytes: usize, dst_row_pitch_bytes: usize,
-                dst_slc_pitch_bytes: usize) -> BufferWriteCmd<'c, 'd, T> {
+    pub fn rect(
+        mut self,
+        src_origin: [usize; 3],
+        dst_origin: [usize; 3],
+        region: [usize; 3],
+        src_row_pitch_bytes: usize,
+        src_slc_pitch_bytes: usize,
+        dst_row_pitch_bytes: usize,
+        dst_slc_pitch_bytes: usize,
+    ) -> BufferWriteCmd<'c, 'd, T> {
         if let BufferCmdDataShape::Lin { offset } = self.cmd.shape {
-            assert!(offset == 0, "ocl::BufferCmd::rect(): This command builder has already been \
-                set to linear mode with '::offset`. You cannot call both '::offset' and '::rect'.");
+            assert!(
+                offset == 0,
+                "ocl::BufferCmd::rect(): This command builder has already been set to linear mode \
+                 with '::offset`. You cannot call both '::offset' and '::rect'."
+            );
         }
         if self.range.len() != self.src.len() {
             panic!("Buffer write: Cannot call '::rect' after calling '::src_offset' or '::len'.");
         }
 
-        self.cmd.shape = BufferCmdDataShape::Rect { src_origin, dst_origin, region,
-            src_row_pitch_bytes, src_slc_pitch_bytes,
-            dst_row_pitch_bytes, dst_slc_pitch_bytes };
+        self.cmd.shape = BufferCmdDataShape::Rect {
+            src_origin,
+            dst_origin,
+            region,
+            src_row_pitch_bytes,
+            src_slc_pitch_bytes,
+            dst_row_pitch_bytes,
+            dst_slc_pitch_bytes,
+        };
 
         self
     }
@@ -1170,7 +1450,10 @@ impl<'c, 'd, T> BufferWriteCmd<'c, 'd, T> where T: OclPrm {
     ///
     /// [`EventList`]: struct.EventList.html
     pub fn ewait<'e, Ewl>(mut self, ewait: Ewl) -> BufferWriteCmd<'c, 'd, T>
-            where 'e: 'c,  Ewl: Into<ClWaitListPtrEnum<'e>> {
+    where
+        'e: 'c,
+        Ewl: Into<ClWaitListPtrEnum<'e>>,
+    {
         self.cmd.ewait = Some(ewait.into());
         self
     }
@@ -1207,7 +1490,10 @@ impl<'c, 'd, T> BufferWriteCmd<'c, 'd, T> where T: OclPrm {
     ///
     /// [`Event::empty`]: struct.Event.html#method.empty
     pub fn enew<'e, En>(mut self, enew: En) -> BufferWriteCmd<'c, 'd, T>
-            where 'e: 'c, En: Into<ClNullEventPtrEnum<'e>> {
+    where
+        'e: 'c,
+        En: Into<ClNullEventPtrEnum<'e>>,
+    {
         self.cmd.enew = Some(enew.into());
         self
     }
@@ -1222,8 +1508,11 @@ impl<'c, 'd, T> BufferWriteCmd<'c, 'd, T> where T: OclPrm {
     pub fn enq(mut self) -> OclResult<()> {
         let write_src = self.src.take();
         let range = self.range.clone();
-        if range.end > write_src.len() { return Err(OclError::from(
-            "Unable to enqueue buffer write command: Invalid src_offset and/or len.")) }
+        if range.end > write_src.len() {
+            return Err(OclError::from(
+                "Unable to enqueue buffer write command: Invalid src_offset and/or len.",
+            ));
+        }
 
         let mut enqueue_with_data = |src: &[T]| {
             let queue = match self.cmd.queue {
@@ -1232,49 +1521,69 @@ impl<'c, 'd, T> BufferWriteCmd<'c, 'd, T> where T: OclPrm {
             };
 
             match self.cmd.kind {
-                BufferCmdKind::Write => {
-                    match self.cmd.shape {
-                        BufferCmdDataShape::Lin { offset } => {
-                            check_len(self.cmd.mem_len, src.len(), offset)?;
+                BufferCmdKind::Write => match self.cmd.shape {
+                    BufferCmdDataShape::Lin { offset } => {
+                        check_len(self.cmd.mem_len, src.len(), offset)?;
 
-                            unsafe {
-                                core::enqueue_write_buffer(queue, &self.cmd.buffer.obj_core, self.cmd.block,
-                                    offset, src, self.cmd.ewait.take(), self.cmd.enew.take())
-                                    .map_err(OclError::from)
-                            }
-                        },
-                        BufferCmdDataShape::Rect { src_origin, dst_origin, region,
-                            src_row_pitch_bytes, src_slc_pitch_bytes, dst_row_pitch_bytes,
-                            dst_slc_pitch_bytes } =>
-                        {
-                            unsafe {
-                                core::enqueue_write_buffer_rect(queue, &self.cmd.buffer.obj_core,
-                                    self.cmd.block, src_origin, dst_origin, region, src_row_pitch_bytes,
-                                    src_slc_pitch_bytes, dst_row_pitch_bytes, dst_slc_pitch_bytes,
-                                    src, self.cmd.ewait.take(), self.cmd.enew.take())
-                                    .map_err(OclError::from)
-                            }
+                        unsafe {
+                            core::enqueue_write_buffer(
+                                queue,
+                                &self.cmd.buffer.obj_core,
+                                self.cmd.block,
+                                offset,
+                                src,
+                                self.cmd.ewait.take(),
+                                self.cmd.enew.take(),
+                            )
+                            .map_err(OclError::from)
                         }
                     }
+                    BufferCmdDataShape::Rect {
+                        src_origin,
+                        dst_origin,
+                        region,
+                        src_row_pitch_bytes,
+                        src_slc_pitch_bytes,
+                        dst_row_pitch_bytes,
+                        dst_slc_pitch_bytes,
+                    } => unsafe {
+                        core::enqueue_write_buffer_rect(
+                            queue,
+                            &self.cmd.buffer.obj_core,
+                            self.cmd.block,
+                            src_origin,
+                            dst_origin,
+                            region,
+                            src_row_pitch_bytes,
+                            src_slc_pitch_bytes,
+                            dst_row_pitch_bytes,
+                            dst_slc_pitch_bytes,
+                            src,
+                            self.cmd.ewait.take(),
+                            self.cmd.enew.take(),
+                        )
+                        .map_err(OclError::from)
+                    },
                 },
                 _ => unreachable!(),
             }
         };
 
         match write_src {
-            WriteSrc::Slice(slice) => {
-                enqueue_with_data(&slice[range])
-            },
+            WriteSrc::Slice(slice) => enqueue_with_data(&slice[range]),
             WriteSrc::RwVec(rw_vec) => {
-                let guard = rw_vec.read().wait()
+                let guard = rw_vec
+                    .read()
+                    .wait()
                     .map_err(|_| OclError::from("Unable to obtain lock."))?;
                 enqueue_with_data(&guard.as_slice()[range])
-            },
+            }
             WriteSrc::Reader(reader) => {
-                let guard = reader.wait()
+                let guard = reader
+                    .wait()
                     .map_err(|_| OclError::from("Unable to obtain lock."))?;
                 enqueue_with_data(&guard.as_slice()[range])
-            },
+            }
             WriteSrc::None => panic!("Invalid read destination."),
         }
     }
@@ -1286,19 +1595,26 @@ impl<'c, 'd, T> BufferWriteCmd<'c, 'd, T> where T: OclPrm {
     /// (such as `RwVec`) must have been passed to `::write`.
     ///
     /// The returned future must be resolved.
-    ///
     pub fn enq_async(mut self) -> OclResult<FutureReadGuard<Vec<T>>> {
         match self.cmd.kind {
             BufferCmdKind::Write => {
                 let mut reader = match self.src {
                     WriteSrc::RwVec(rw_vec) => rw_vec.read(),
                     WriteSrc::Reader(reader) => reader,
-                    _ => return Err("BufferWriteCmd::enq_async: Invalid data destination kind for an
-                        asynchronous enqueue. The read destination must be a 'RwVec'.".into()),
+                    _ => {
+                        return Err(
+                            "BufferWriteCmd::enq_async: Invalid data destination kind for an
+                        asynchronous enqueue. The read destination must be a 'RwVec'."
+                                .into(),
+                        )
+                    }
                 };
                 let reader_len = unsafe { (*reader.as_ptr()).len() };
-                if self.range.end > reader_len { return Err(OclError::from(
-                    "Unable to enqueue buffer write command: Invalid src_offset and/or len.")) }
+                if self.range.end > reader_len {
+                    return Err(OclError::from(
+                        "Unable to enqueue buffer write command: Invalid src_offset and/or len.",
+                    ));
+                }
 
                 if let Some(wl) = self.cmd.ewait {
                     reader.set_lock_wait_events(wl);
@@ -1312,7 +1628,8 @@ impl<'c, 'd, T> BufferWriteCmd<'c, 'd, T> where T: OclPrm {
                 reader.create_lock_event(queue.context_ptr()?)?;
 
                 let src = unsafe {
-                    &::std::slice::from_raw_parts((*reader.as_ptr()).as_ptr(), reader_len)[self.range]
+                    &::std::slice::from_raw_parts((*reader.as_ptr()).as_ptr(), reader_len)
+                        [self.range]
                 };
 
                 let mut write_event = Event::empty();
@@ -1321,21 +1638,42 @@ impl<'c, 'd, T> BufferWriteCmd<'c, 'd, T> where T: OclPrm {
                     BufferCmdDataShape::Lin { offset } => {
                         check_len(self.cmd.mem_len, src.len(), offset)?;
                         unsafe {
-                            core::enqueue_write_buffer(queue, &self.cmd.buffer.obj_core, false,
-                                offset, src, reader.lock_event(), Some(&mut write_event))?;
-                        }
-                    },
-                    BufferCmdDataShape::Rect { src_origin, dst_origin, region,
-                            src_row_pitch_bytes, src_slc_pitch_bytes,
-                                dst_row_pitch_bytes, dst_slc_pitch_bytes } =>
-                    {
-                        unsafe {
-                            core::enqueue_write_buffer_rect(queue, &self.cmd.buffer.obj_core,
-                                false, src_origin, dst_origin, region, src_row_pitch_bytes,
-                                src_slc_pitch_bytes, dst_row_pitch_bytes, dst_slc_pitch_bytes,
-                                src, reader.lock_event(), Some(&mut write_event))?;
+                            core::enqueue_write_buffer(
+                                queue,
+                                &self.cmd.buffer.obj_core,
+                                false,
+                                offset,
+                                src,
+                                reader.lock_event(),
+                                Some(&mut write_event),
+                            )?;
                         }
                     }
+                    BufferCmdDataShape::Rect {
+                        src_origin,
+                        dst_origin,
+                        region,
+                        src_row_pitch_bytes,
+                        src_slc_pitch_bytes,
+                        dst_row_pitch_bytes,
+                        dst_slc_pitch_bytes,
+                    } => unsafe {
+                        core::enqueue_write_buffer_rect(
+                            queue,
+                            &self.cmd.buffer.obj_core,
+                            false,
+                            src_origin,
+                            dst_origin,
+                            region,
+                            src_row_pitch_bytes,
+                            src_slc_pitch_bytes,
+                            dst_row_pitch_bytes,
+                            dst_slc_pitch_bytes,
+                            src,
+                            reader.lock_event(),
+                            Some(&mut write_event),
+                        )?;
+                    },
                 }
 
                 if let Some(ref mut enew) = self.cmd.enew.take() {
@@ -1344,7 +1682,7 @@ impl<'c, 'd, T> BufferWriteCmd<'c, 'd, T> where T: OclPrm {
 
                 reader.set_command_wait_event(write_event);
                 Ok(reader)
-            },
+            }
             _ => unreachable!(),
         }
     }
@@ -1360,7 +1698,6 @@ impl<'c, 'd, T> BufferWriteCmd<'c, 'd, T> where T: OclPrm {
     /// (such as `RwVec`) must have been passed to `::write`.
     ///
     /// The returned future must be resolved.
-    ///
     pub fn enq_async_then_write(self) -> OclResult<FutureWriteGuard<Vec<T>>> {
         // NOTE: The precise point in time at which `::upgrade_after_command`
         // is called does not matter since a read request will have already
@@ -1368,10 +1705,10 @@ impl<'c, 'd, T> BufferWriteCmd<'c, 'd, T> where T: OclPrm {
         // any time before the read guard is destroyed and have the exact same
         // effect. That read request will lock out any possibility of a write
         // request interfering with the global r/w order.
-        self.enq_async().map(|read_guard| read_guard.upgrade_after_command())
+        self.enq_async()
+            .map(|read_guard| read_guard.upgrade_after_command())
     }
 }
-
 
 /// A command builder used to enqueue a map command.
 ///
@@ -1387,13 +1724,19 @@ impl<'c, 'd, T> BufferWriteCmd<'c, 'd, T> where T: OclPrm {
 /// [`FutureMemMap`]: async/struct.FutureMemMap.html
 /// [slice]: https://doc.rust-lang.org/std/primitive.slice.html
 #[must_use = "commands do nothing unless enqueued"]
-pub struct BufferMapCmd<'c, T> where T: 'c + OclPrm {
+pub struct BufferMapCmd<'c, T>
+where
+    T: 'c + OclPrm,
+{
     cmd: BufferCmd<'c, T>,
     flags: Option<MapFlags>,
-    len: Option<usize> ,
+    len: Option<usize>,
 }
 
-impl<'c, T> BufferMapCmd<'c, T> where T: OclPrm {
+impl<'c, T> BufferMapCmd<'c, T>
+where
+    T: OclPrm,
+{
     /// Specifies the flags to be used for this map command.
     ///
     /// Flags can also be specified using the `::read`, `::write`, and
@@ -1404,9 +1747,8 @@ impl<'c, T> BufferMapCmd<'c, T> where T: OclPrm {
     /// [SDK]: https://www.khronos.org/registry/OpenCL/sdk/1.2/docs/man/xhtml/clEnqueueMapBuffer.html
     //
     // * TODO: Add links to methods listed above.
-    // * TODO: Sort out the `BufferBuilder::host_slice`/`::flags` situation.
-    //   Possibly create separate methods, `use_host_ptr` and
-    //   `copy_host_slice`.
+    // * TODO: Sort out the `BufferBuilder::host_slice`/`::flags` situation. Possibly create
+    //   separate methods, `use_host_ptr` and `copy_host_slice`.
     pub fn flags(mut self, flags: MapFlags) -> BufferMapCmd<'c, T> {
         self.flags = Some(flags);
         self
@@ -1462,8 +1804,7 @@ impl<'c, T> BufferMapCmd<'c, T> where T: OclPrm {
     ///
     /// If unspecified the entire buffer will be mapped.
     //
-    // * TODO: Consider taking an `Into<SpatialDims>` argument and possibly
-    //   renaming method.
+    // * TODO: Consider taking an `Into<SpatialDims>` argument and possibly renaming method.
     pub fn len(mut self, len: usize) -> BufferMapCmd<'c, T> {
         self.len = Some(len);
         self
@@ -1485,8 +1826,11 @@ impl<'c, T> BufferMapCmd<'c, T> where T: OclPrm {
     ///
     /// The 'shape' may not have already been set to rectangular by the
     /// `::rect` function.
-    pub fn offset(self, offset: usize)  -> BufferMapCmd<'c, T> {
-        BufferMapCmd { cmd: self.cmd.offset(offset), ..self }
+    pub fn offset(self, offset: usize) -> BufferMapCmd<'c, T> {
+        BufferMapCmd {
+            cmd: self.cmd.offset(offset),
+            ..self
+        }
     }
 
     /// Specifies an event or list of events to wait on before the command
@@ -1518,7 +1862,10 @@ impl<'c, T> BufferMapCmd<'c, T> where T: OclPrm {
     ///
     /// [`EventList`]: struct.EventList.html
     pub fn ewait<'e, Ewl>(mut self, ewait: Ewl) -> BufferMapCmd<'c, T>
-            where 'e: 'c,  Ewl: Into<ClWaitListPtrEnum<'e>> {
+    where
+        'e: 'c,
+        Ewl: Into<ClWaitListPtrEnum<'e>>,
+    {
         self.cmd.ewait = Some(ewait.into());
         self
     }
@@ -1555,15 +1902,26 @@ impl<'c, T> BufferMapCmd<'c, T> where T: OclPrm {
     ///
     /// [`Event::empty`]: struct.Event.html#method.empty
     pub fn enew<'e, En>(mut self, enew: En) -> BufferMapCmd<'c, T>
-            where 'e: 'c, En: Into<ClNullEventPtrEnum<'e>> {
+    where
+        'e: 'c,
+        En: Into<ClNullEventPtrEnum<'e>>,
+    {
         self.cmd.enew = Some(enew.into());
         self
     }
 
     /// Returns operation details.
     #[inline]
-    fn enq_details(&mut self) -> OclResult<(usize, usize, Queue, MapFlags,
-            Option<ClWaitListPtrEnum<'c>>, Option<ClNullEventPtrEnum<'c>>)> {
+    fn enq_details(
+        &mut self,
+    ) -> OclResult<(
+        usize,
+        usize,
+        Queue,
+        MapFlags,
+        Option<ClWaitListPtrEnum<'c>>,
+        Option<ClNullEventPtrEnum<'c>>,
+    )> {
         if let BufferCmdKind::Map = self.cmd.kind {
             if let BufferCmdDataShape::Lin { offset } = self.cmd.shape {
                 let len = match self.len {
@@ -1580,7 +1938,14 @@ impl<'c, T> BufferMapCmd<'c, T> where T: OclPrm {
 
                 let flags = self.flags.unwrap_or(MapFlags::empty());
 
-                Ok((offset, len, queue, flags, self.cmd.ewait.take(), self.cmd.enew.take()))
+                Ok((
+                    offset,
+                    len,
+                    queue,
+                    flags,
+                    self.cmd.ewait.take(),
+                    self.cmd.enew.take(),
+                ))
             } else {
                 Err(BufferCmdError::RectUnavailable.into())
             }
@@ -1600,15 +1965,29 @@ impl<'c, T> BufferMapCmd<'c, T> where T: OclPrm {
     /// writes to the same memory region at the same time. Use atomics or some
     /// other synchronization mechanism to ensure this.
     pub unsafe fn enq(mut self) -> OclResult<MemMap<T>> {
-        let (offset, len, queue, flags, ewait, enew, /*is_mapped*/) = self.enq_details()?;
+        let (offset, len, queue, flags, ewait, enew /* is_mapped */) = self.enq_details()?;
 
-        let mm_core = core::enqueue_map_buffer::<T, _, _, _>(&queue,
-            &self.cmd.buffer.obj_core, true, flags, offset, len, ewait, enew)?;
+        let mm_core = core::enqueue_map_buffer::<T, _, _, _>(
+            &queue,
+            &self.cmd.buffer.obj_core,
+            true,
+            flags,
+            offset,
+            len,
+            ewait,
+            enew,
+        )?;
 
         let unmap_event = None;
 
-        Ok(MemMap::new(mm_core, len, None, unmap_event, self.cmd.buffer.obj_core.clone(),
-            queue))
+        Ok(MemMap::new(
+            mm_core,
+            len,
+            None,
+            unmap_event,
+            self.cmd.buffer.obj_core.clone(),
+            queue,
+        ))
     }
 
     /// Enqueues a map command and returns a future representing the
@@ -1624,13 +2003,20 @@ impl<'c, T> BufferMapCmd<'c, T> where T: OclPrm {
     /// writes to the same memory region at the same time. Use atomics or some
     /// other synchronization mechanism to ensure this.
     pub unsafe fn enq_async(mut self) -> OclResult<FutureMemMap<T>> {
-        let (offset, len, queue, flags, ewait, enew, /*is_mapped*/) = self.enq_details()?;
+        let (offset, len, queue, flags, ewait, enew /* is_mapped */) = self.enq_details()?;
 
         let mut map_event = Event::empty();
 
-        let mm_core = core::enqueue_map_buffer::<T, _, _, _>(&queue,
-            &self.cmd.buffer.obj_core, false, flags, offset, len, ewait,
-            Some(&mut map_event))?;
+        let mm_core = core::enqueue_map_buffer::<T, _, _, _>(
+            &queue,
+            &self.cmd.buffer.obj_core,
+            false,
+            flags,
+            offset,
+            len,
+            ewait,
+            Some(&mut map_event),
+        )?;
 
         // If a 'new/null event' has been set, copy pointer
         // into it and increase refcount (to 2).
@@ -1639,19 +2025,20 @@ impl<'c, T> BufferMapCmd<'c, T> where T: OclPrm {
             self_enew.clone_from(&map_event)
         }
 
-        Ok(FutureMemMap::new(mm_core, len, map_event,
-            self.cmd.buffer.obj_core.clone(), queue, /*is_mapped*/))
-
+        Ok(FutureMemMap::new(
+            mm_core,
+            len,
+            map_event,
+            self.cmd.buffer.obj_core.clone(),
+            queue, /* is_mapped */
+        ))
     }
 }
-
-
 
 /// A chunk of memory physically located on a device, such as a GPU.
 ///
 /// Data is stored remotely in a memory buffer on the device associated with
 /// `queue`.
-///
 #[derive(Debug, Clone)]
 pub struct Buffer<T: OclPrm> {
     obj_core: MemCore,
@@ -1683,10 +2070,16 @@ impl<T: OclPrm> Buffer<T> {
     ///
     /// [`BufferBuilder`]: builders/struct.BufferBuilder.html
     /// [SDK]: https://www.khronos.org/registry/cl/sdk/1.2/docs/man/xhtml/clCreateBuffer.html
-    ///
-    pub unsafe fn new<'e, 'o, Q, D>(que_ctx: Q, flags: MemFlags, len: D,
-            host_slice: Option<&[T]>) -> OclResult<Buffer<T>>
-            where Q: Into<QueCtx<'o>>, D: Into<SpatialDims> {
+    pub unsafe fn new<'e, 'o, Q, D>(
+        que_ctx: Q,
+        flags: MemFlags,
+        len: D,
+        host_slice: Option<&[T]>,
+    ) -> OclResult<Buffer<T>>
+    where
+        Q: Into<QueCtx<'o>>,
+        D: Into<SpatialDims>,
+    {
         // let flags = flags_opt.unwrap_or(::flags::MEM_READ_WRITE);
         let len = len.into().to_len();
         let que_ctx = que_ctx.into();
@@ -1696,7 +2089,7 @@ impl<T: OclPrm> Buffer<T> {
             QueCtx::Queue(ref q) => {
                 ctx_owned = q.context();
                 &ctx_owned
-            },
+            }
             QueCtx::Context(c) => c,
         };
 
@@ -1732,16 +2125,22 @@ impl<T: OclPrm> Buffer<T> {
     ///
     /// See the [`BufferCmd` docs](builders/struct.BufferCmd.html)
     /// for more info.
-    ///
-    #[cfg(not(feature="opencl_vendor_mesa"))]
-    pub fn from_gl_buffer<'o, Q>(que_ctx: Q, flags_opt: Option<MemFlags>, gl_object: cl_GLuint)
-            -> OclResult<Buffer<T>>
-            where Q: Into<QueCtx<'o>> {
+    #[cfg(not(feature = "opencl_vendor_mesa"))]
+    pub fn from_gl_buffer<'o, Q>(
+        que_ctx: Q,
+        flags_opt: Option<MemFlags>,
+        gl_object: cl_GLuint,
+    ) -> OclResult<Buffer<T>>
+    where
+        Q: Into<QueCtx<'o>>,
+    {
         let flags = flags_opt.unwrap_or(core::MEM_READ_WRITE);
         let que_ctx = que_ctx.into();
 
         let obj_core = match que_ctx {
-            QueCtx::Queue(ref q) => unsafe { core::create_from_gl_buffer(&q.context(), gl_object, flags)? },
+            QueCtx::Queue(ref q) => unsafe {
+                core::create_from_gl_buffer(&q.context(), gl_object, flags)?
+            },
             QueCtx::Context(c) => unsafe { core::create_from_gl_buffer(c, gl_object, flags)? },
         };
 
@@ -1767,11 +2166,13 @@ impl<T: OclPrm> Buffer<T> {
     ///
     /// See the [command builder documentation](builders/struct.BufferCmd)
     /// for more details.
-    ///
-    ///
     #[inline]
     pub fn cmd<'c>(&'c self) -> BufferCmd<'c, T> {
-        BufferCmd::new(self, self.queue.as_ref(), /*&self.obj_core,*/ self.len())
+        BufferCmd::new(
+            self,
+            self.queue.as_ref(),
+            /* &self.obj_core, */ self.len(),
+        )
     }
 
     /// Returns a command builder used to read data.
@@ -1780,10 +2181,11 @@ impl<T: OclPrm> Buffer<T> {
     ///
     /// See the [command builder documentation](builders/struct.BufferCmd#method.read)
     /// for more details.
-    ///
     #[inline]
     pub fn read<'c, 'd, R>(&'c self, dst: R) -> BufferReadCmd<'c, 'd, T>
-            where 'd: 'c, R: Into<ReadDst<'d, T>>
+    where
+        'd: 'c,
+        R: Into<ReadDst<'d, T>>,
     {
         self.cmd().read(dst)
     }
@@ -1794,10 +2196,11 @@ impl<T: OclPrm> Buffer<T> {
     ///
     /// See the [command builder documentation](builders/struct.BufferCmd#method.write)
     /// for more details.
-    ///
     #[inline]
     pub fn write<'c, 'd, W>(&'c self, src: W) -> BufferWriteCmd<'c, 'd, T>
-            where 'd: 'c, W: Into<WriteSrc<'d, T>>
+    where
+        'd: 'c,
+        W: Into<WriteSrc<'d, T>>,
     {
         self.cmd().write(src)
     }
@@ -1832,11 +2235,16 @@ impl<T: OclPrm> Buffer<T> {
     ///
     /// See the [command builder documentation](builders/struct.BufferCmd#method.copy)
     /// for more details.
-    ///
     #[inline]
-    pub fn copy<'c, M>(&'c self, dst_buffer: &'c M, dst_offset: Option<usize>, len: Option<usize>)
-            -> BufferCmd<'c, T>
-            where M: AsMem<T> {
+    pub fn copy<'c, M>(
+        &'c self,
+        dst_buffer: &'c M,
+        dst_offset: Option<usize>,
+        len: Option<usize>,
+    ) -> BufferCmd<'c, T>
+    where
+        M: AsMem<T>,
+    {
         self.cmd().copy(dst_buffer, dst_offset, len)
     }
 
@@ -1932,13 +2340,14 @@ impl<T: OclPrm> Buffer<T> {
     /// [`BufferBuilder::queue`]: builders/struct.BufferBuilder.html#method.queue
     //
     // TODO: Allow `Option<Queue>` (to unset queue)?
-    //
     #[inline]
     pub fn set_default_queue<'a>(&'a mut self, queue: Queue) -> &'a mut Buffer<T> {
         // [FIXME]: Update this to check whether new queue.device is within
         // context or matching existing queue.
         // assert!(queue.device() == self.que_ctx.queue().device());
+        // println!("set {:?} val {:?}", self as *const _, queue.as_ptr());
         self.queue = Some(queue);
+
         self
     }
 
@@ -1948,19 +2357,22 @@ impl<T: OclPrm> Buffer<T> {
     /// commands if no queue is specified.
     #[inline]
     pub fn default_queue(&self) -> Option<&Queue> {
+        // println!(
+        //     "get {:?} val {:?}",
+        //     self as *const _,
+        //     self.queue.as_ref().unwrap().as_ptr()
+        // );
         self.queue.as_ref()
     }
 
     /// Returns a reference to the core pointer wrapper, usable by functions in
     /// the `core` module.
-    ///
     #[inline]
     pub fn as_core(&self) -> &MemCore {
         &self.obj_core
     }
 
     /// Returns the memory flags used during the creation of this buffer.
-    ///
     #[inline]
     pub fn flags(&self) -> OclResult<MemFlags> {
         match self.mem_info(MemInfo::Flags)? {
@@ -2014,19 +2426,27 @@ impl<T: OclPrm> Buffer<T> {
     /// [`ocl::flags`]: flags/index.html
     /// [mem_flags]: flags/struct.MemFlags.html
     /// [`MemFlags::new().read_write()`] flags/struct.MemFlags.html#method.read_write
-    ///
-    pub fn create_sub_buffer<Do, Dl>(&self, flags_opt: Option<MemFlags>, offset: Do,
-            len: Dl) -> OclResult<Buffer<T>>
-            where Do: Into<SpatialDims>, Dl: Into<SpatialDims> {
+    pub fn create_sub_buffer<Do, Dl>(
+        &self,
+        flags_opt: Option<MemFlags>,
+        offset: Do,
+        len: Dl,
+    ) -> OclResult<Buffer<T>>
+    where
+        Do: Into<SpatialDims>,
+        Dl: Into<SpatialDims>,
+    {
         let flags = flags_opt.unwrap_or(crate::flags::MEM_READ_WRITE);
 
         // Check flags here to preempt a somewhat vague OpenCL runtime error message:
-        assert!(!flags.contains(crate::flags::MEM_USE_HOST_PTR) &&
-            !flags.contains(crate::flags::MEM_ALLOC_HOST_PTR) &&
-            !flags.contains(crate::flags::MEM_COPY_HOST_PTR),
-            "'MEM_USE_HOST_PTR', 'MEM_ALLOC_HOST_PTR', or 'MEM_COPY_HOST_PTR' flags may \
-            not be specified when creating a sub-buffer. They will be inherited from \
-            the containing buffer.");
+        assert!(
+            !flags.contains(crate::flags::MEM_USE_HOST_PTR)
+                && !flags.contains(crate::flags::MEM_ALLOC_HOST_PTR)
+                && !flags.contains(crate::flags::MEM_COPY_HOST_PTR),
+            "'MEM_USE_HOST_PTR', 'MEM_ALLOC_HOST_PTR', or 'MEM_COPY_HOST_PTR' flags may not be \
+             specified when creating a sub-buffer. They will be inherited from the containing \
+             buffer."
+        );
 
         let offset = offset.into().to_len();
         let len = len.into().to_len();
@@ -2036,18 +2456,24 @@ impl<T: OclPrm> Buffer<T> {
         // let len = dims.to_len();
 
         if offset > buffer_len {
-            return Err(format!("Buffer::create_sub_buffer: Origin ({:?}) is outside of the \
-                dimensions of the source buffer ({:?}).", offset, buffer_len).into());
+            return Err(format!(
+                "Buffer::create_sub_buffer: Origin ({:?}) is outside of the dimensions of the \
+                 source buffer ({:?}).",
+                offset, buffer_len
+            )
+            .into());
         }
 
         if offset + len > buffer_len {
-            return Err(format!("Buffer::create_sub_buffer: Sub-buffer region (origin: '{:?}', \
-                len: '{:?}') exceeds the dimensions of the source buffer ({:?}).",
-                offset, len, buffer_len).into());
+            return Err(format!(
+                "Buffer::create_sub_buffer: Sub-buffer region (origin: '{:?}', len: '{:?}') \
+                 exceeds the dimensions of the source buffer ({:?}).",
+                offset, len, buffer_len
+            )
+            .into());
         }
 
-        let obj_core = core::create_sub_buffer::<T>(self, flags,
-            &BufferRegion::new(offset, len))?;
+        let obj_core = core::create_sub_buffer::<T>(self, flags, &BufferRegion::new(offset, len))?;
 
         Ok(Buffer {
             obj_core,
@@ -2071,7 +2497,10 @@ impl<T: OclPrm> Buffer<T> {
             .field("MapCount", &self.mem_info(MemInfo::MapCount))
             .field("ReferenceCount", &self.mem_info(MemInfo::ReferenceCount))
             .field("Context", &self.mem_info(MemInfo::Context))
-            .field("AssociatedMemobject", &self.mem_info(MemInfo::AssociatedMemobject))
+            .field(
+                "AssociatedMemobject",
+                &self.mem_info(MemInfo::AssociatedMemobject),
+            )
             .field("Offset", &self.mem_info(MemInfo::Offset))
             .finish()
     }
@@ -2109,7 +2538,6 @@ impl<T: OclPrm> AsMem<T> for Buffer<T> {
     }
 }
 
-
 impl<T: OclPrm> std::fmt::Display for Buffer<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         self.fmt_mem_info(f)
@@ -2123,23 +2551,27 @@ unsafe impl<'a, T> MemCmdAll for Buffer<T> where T: OclPrm {}
 unsafe impl<'a, T> MemCmdAll for &'a Buffer<T> where T: OclPrm {}
 unsafe impl<'a, T> MemCmdAll for &'a mut Buffer<T> where T: OclPrm {}
 
-
 /// A buffer builder.
-///
+//
 // * TODO: Add examples and details. For now see project examples folder.
 // * TODO: Consider converting this to a re-usable builder.
-//
 #[must_use = "builders do nothing unless '::build' is called"]
 #[derive(Debug)]
-pub struct BufferBuilder<'a, T> where T: OclPrm {
+pub struct BufferBuilder<'a, T>
+where
+    T: OclPrm,
+{
     queue_option: Option<QueCtx<'a>>,
     flags: Option<MemFlags>,
     host_slice: HostSlice<'a, T>,
     len: usize,
-    fill_val: Option<(T, Option<ClNullEventPtrEnum<'a>>)>
+    fill_val: Option<(T, Option<ClNullEventPtrEnum<'a>>)>,
 }
 
-impl<'a, T> BufferBuilder<'a, T> where T: 'a + OclPrm {
+impl<'a, T> BufferBuilder<'a, T>
+where
+    T: 'a + OclPrm,
+{
     /// Returns a new buffer builder.
     pub fn new() -> BufferBuilder<'a, T> {
         BufferBuilder {
@@ -2157,8 +2589,13 @@ impl<'a, T> BufferBuilder<'a, T> where T: 'a + OclPrm {
     ///
     /// [`::queue`]: builders/struct.BufferBuilder.html#method.queue
     pub fn context<'o>(mut self, context: &'o Context) -> BufferBuilder<'a, T>
-            where 'o: 'a {
-        assert!(self.queue_option.is_none(), "A context or queue has already been set.");
+    where
+        'o: 'a,
+    {
+        assert!(
+            self.queue_option.is_none(),
+            "A context or queue has already been set."
+        );
         self.queue_option = Some(QueCtx::Context(context));
         self
     }
@@ -2187,7 +2624,10 @@ impl<'a, T> BufferBuilder<'a, T> where T: 'a + OclPrm {
     ///
     /// [`::context`]: builders/struct.BufferBuilder.html#method.context
     pub fn queue(mut self, default_queue: Queue) -> BufferBuilder<'a, T> {
-        assert!(self.queue_option.is_none(), "A context or queue has already been set.");
+        assert!(
+            self.queue_option.is_none(),
+            "A context or queue has already been set."
+        );
         self.queue_option = Some(QueCtx::Queue(default_queue));
         self
     }
@@ -2207,9 +2647,11 @@ impl<'a, T> BufferBuilder<'a, T> where T: 'a + OclPrm {
     ///
     /// [SDK Docs]: https://www.khronos.org/registry/cl/sdk/1.2/docs/man/xhtml/clCreateBuffer.html
     pub fn flags(mut self, flags: MemFlags) -> BufferBuilder<'a, T> {
-        assert!(!flags.contains(MemFlags::new().use_host_ptr()),
-            "The `BufferBuilder::flags` method may not be used to set the \
-            `MEM_USE_HOST_PTR` flag. Use the `::use_host_ptr` method instead.");
+        assert!(
+            !flags.contains(MemFlags::new().use_host_ptr()),
+            "The `BufferBuilder::flags` method may not be used to set the `MEM_USE_HOST_PTR` \
+             flag. Use the `::use_host_ptr` method instead."
+        );
         self.flags = Some(flags);
         self
     }
@@ -2244,9 +2686,13 @@ impl<'a, T> BufferBuilder<'a, T> where T: 'a + OclPrm {
     ///
     /// [align_rules]: https://www.khronos.org/registry/OpenCL/sdk/1.2/docs/man/xhtml/dataTypes.html
     pub unsafe fn use_host_slice<'d>(mut self, host_slice: &'d [T]) -> BufferBuilder<'a, T>
-            where 'd: 'a {
-        assert!(self.host_slice.is_none(), "BufferBuilder::use_host_slice: \
-            A host slice has already been specified.");
+    where
+        'd: 'a,
+    {
+        assert!(
+            self.host_slice.is_none(),
+            "BufferBuilder::use_host_slice: A host slice has already been specified."
+        );
         self.host_slice = HostSlice::Use(host_slice);
         self
     }
@@ -2260,11 +2706,14 @@ impl<'a, T> BufferBuilder<'a, T> where T: 'a + OclPrm {
     ///
     /// `::copy_host_slice` or `::use_host_slice` must not have already been
     /// called.
-    ///
     pub fn copy_host_slice<'d>(mut self, host_slice: &'d [T]) -> BufferBuilder<'a, T>
-            where 'd: 'a {
-        assert!(self.host_slice.is_none(), "BufferBuilder::copy_host_slice: \
-            A host slice has already been specified.");
+    where
+        'd: 'a,
+    {
+        assert!(
+            self.host_slice.is_none(),
+            "BufferBuilder::copy_host_slice: A host slice has already been specified."
+        );
         self.host_slice = HostSlice::Copy(host_slice);
         self
     }
@@ -2276,7 +2725,9 @@ impl<'a, T> BufferBuilder<'a, T> where T: 'a + OclPrm {
     /// specified in `bytes / sizeof(T)` (like everything else in Rust) unless
     /// otherwise noted.
     pub fn len<D>(mut self, len: D) -> BufferBuilder<'a, T>
-            where D: Into<SpatialDims> {
+    where
+        D: Into<SpatialDims>,
+    {
         self.len = len.into().to_len();
         self
     }
@@ -2319,11 +2770,16 @@ impl<'a, T> BufferBuilder<'a, T> where T: 'a + OclPrm {
     /// Not calling this method at all will cause the fill command to block
     /// before returning the new buffer and is the safe option if you don't
     /// want to worry about it.
-    ///
     pub fn fill_event<'b, 'e, En>(mut self, enew: En) -> BufferBuilder<'a, T>
-            where 'e: 'a, En: Into<ClNullEventPtrEnum<'e>> {
+    where
+        'e: 'a,
+        En: Into<ClNullEventPtrEnum<'e>>,
+    {
         match self.fill_val {
-            Some(ref fv) => assert!(fv.1.is_some(), "Buffer::fill_event: Fill event already set."),
+            Some(ref fv) => assert!(
+                fv.1.is_some(),
+                "Buffer::fill_event: Fill event already set."
+            ),
             None => panic!("Buffer::fill_event: Fill value must be set first"),
         }
         self.fill_val = self.fill_val.take().map(|fv| (fv.0, Some(enew.into())));
@@ -2347,25 +2803,31 @@ impl<'a, T> BufferBuilder<'a, T> where T: 'a + OclPrm {
             }
             HostSlice::Copy(hs) => {
                 if self.fill_val.is_some() {
-                    panic!("ocl::BufferBuilder::build: Cannot create a buffer with both
-                        'copy_host_slice' and 'fill_val' specified. Use one or the other.");
+                    panic!(
+                        "ocl::BufferBuilder::build: Cannot create a buffer with both
+                        'copy_host_slice' and 'fill_val' specified. Use one or the other."
+                    );
                 }
 
                 flags.insert(MemFlags::new().copy_host_ptr());
                 Some(hs)
-            },
+            }
             HostSlice::None => None,
         };
 
         let qc = match self.queue_option {
             Some(qc) => qc,
-            None => panic!("ocl::BufferBuilder::build: A context or default queue must be set \
-                with '.context(...)' or '.queue(...)'."),
+            None => panic!(
+                "ocl::BufferBuilder::build: A context or default queue must be set with \
+                 '.context(...)' or '.queue(...)'."
+            ),
         };
 
         let len = match self.len {
-            0 => panic!("ocl::BufferBuilder::build: The length must be set with \
-                '.len(...)' and cannot be zero."),
+            0 => panic!(
+                "ocl::BufferBuilder::build: The length must be set with '.len(...)' and cannot be \
+                 zero."
+            ),
             l => l,
         };
 
@@ -2401,9 +2863,11 @@ impl<'a, T> BufferBuilder<'a, T> where T: 'a + OclPrm {
                             }
                         }
                     }
-                },
-                None => panic!("ocl::BufferBuilder::build: A queue must be specified \
-                    for this builder with `::queue` when using `::fill_val`."),
+                }
+                None => panic!(
+                    "ocl::BufferBuilder::build: A queue must be specified for this builder with \
+                     `::queue` when using `::fill_val`."
+                ),
             }
         }
 
